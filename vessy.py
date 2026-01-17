@@ -3,6 +3,7 @@ from groq import Groq
 import os
 import json
 from PIL import Image, ImageDraw
+import pytesseract
 
 # ================= CONFIG =================
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
@@ -10,38 +11,37 @@ llm = Groq(api_key=GROQ_API_KEY)
 
 st.set_page_config(page_title="Visual WhatNext AI", layout="centered")
 st.title("Visual WhatNext AI 🧠")
-st.caption("Understand the error. Know exactly what to do next.")
+st.caption("Upload a screenshot. We tell you exactly what to do next.")
 
 # ================= INPUT =================
 context = st.text_area(
-    "Paste error / output / logs here",
-    height=220,
-    placeholder="Paste terminal output, stack trace, warnings, or error messages..."
+    "Paste error / logs (optional)",
+    height=200,
+    placeholder="Paste error messages, logs, or output here..."
 )
 
 uploaded_image = st.file_uploader(
-    "Upload screenshot (optional)",
+    "Upload screenshot (recommended)",
     type=["png", "jpg", "jpeg"]
 )
 
 # ================= SYSTEM PROMPT =================
 SYSTEM_PROMPT = """
-You are a senior software support engineer helping users debug code errors.
+You are a senior technical support engineer.
 
 Your task:
-- Identify whether the situation is WORKING, WARNING, or ERROR
-- Identify the programming language if possible
-- Summarize the issue in one short line
-- Explain what is happening in simple terms
-- Give up to 3 clear next steps
-- If the fix is uncertain, ask ONE clarifying question instead
-- Suggest visual labels ONLY if a screenshot is relevant
+- Understand what the user is seeing on their screen
+- Decide if the state is WORKING, WARNING, or ERROR
+- Identify what the user is trying to do
+- Explain the problem simply
+- Give at most 3 clear next steps
+- Add visual_labels ONLY if they clearly exist on the screen
+- Ask ONE clarifying question if unsure
 
 Rules:
-- Do NOT hallucinate code or UI elements
-- If logs are incomplete, say so
-- If the program is running with only warnings, say it is safe
-- Be concise, practical, and honest
+- Use visible screen text as ground truth
+- Do NOT invent UI elements
+- Be concise, honest, and practical
 
 Return ONLY valid JSON in this exact format:
 {
@@ -55,22 +55,37 @@ Return ONLY valid JSON in this exact format:
 }
 """
 
-# ================= AI DIAGNOSIS =================
-def diagnose(context_text, has_image):
-    if not context_text.strip():
+# ================= OCR =================
+def extract_screen_text(image):
+    try:
+        text = pytesseract.image_to_string(image)
+        text = text.strip()
+        return text if text else None
+    except Exception:
+        return None
+
+# ================= AI LOGIC =================
+def diagnose(context_text, image_text):
+    if not context_text.strip() and not image_text:
         return {
             "status": "WORKING",
             "language": "unknown",
-            "error_summary": "No error provided",
-            "explanation": "No logs or errors were shared.",
-            "next_steps": ["Paste the error or output you want checked."],
+            "error_summary": "No information provided",
+            "explanation": "No logs or screen content were shared.",
+            "next_steps": ["Paste logs or upload a screenshot where you are stuck."],
             "confidence": "high",
             "visual_labels": []
         }
 
-    user_content = context_text
-    if has_image:
-        user_content += "\n\nNOTE: The user also uploaded a screenshot related to this issue."
+    user_content = ""
+
+    if context_text.strip():
+        user_content += f"LOGS / TEXT:\n{context_text}\n\n"
+
+    if image_text:
+        user_content += f"VISIBLE TEXT FROM SCREENSHOT:\n{image_text}\n\n"
+
+    user_content += "Base your reasoning strictly on the visible information."
 
     res = llm.chat.completions.create(
         model="llama-3.1-8b-instant",
@@ -79,7 +94,7 @@ def diagnose(context_text, has_image):
             {"role": "user", "content": user_content}
         ],
         temperature=0,
-        max_tokens=500
+        max_tokens=600
     )
 
     try:
@@ -91,14 +106,14 @@ def diagnose(context_text, has_image):
         return {
             "status": "ERROR",
             "language": "unknown",
-            "error_summary": "Unclear or malformed error",
-            "explanation": "The error output could not be reliably interpreted.",
-            "next_steps": ["Retry with only the relevant error lines."],
+            "error_summary": "Unclear issue",
+            "explanation": "The screenshot or logs were not clear enough to diagnose.",
+            "next_steps": ["Upload a clearer screenshot or only the relevant error."],
             "confidence": "low",
             "visual_labels": []
         }
 
-# ================= IMAGE LABELING =================
+# ================= VISUAL OVERLAY =================
 def annotate_with_labels(image, labels):
     draw = ImageDraw.Draw(image)
 
@@ -123,47 +138,46 @@ def annotate_with_labels(image, labels):
     return image
 
 # ================= ACTION =================
-if st.button("Diagnose"):
-    with st.spinner("Analyzing..."):
-        result = diagnose(context, uploaded_image is not None)
+if st.button("Analyze & Guide"):
+    with st.spinner("Understanding the screen..."):
+        image_text = None
+        img = None
 
-    status = result["status"]
-    language = result["language"]
-    summary = result["error_summary"]
-    explanation = result["explanation"]
-    steps = result["next_steps"]
-    confidence = result["confidence"]
-    labels = result["visual_labels"]
+        if uploaded_image:
+            img = Image.open(uploaded_image).convert("RGB")
+            image_text = extract_screen_text(img)
+
+        result = diagnose(context, image_text)
 
     # ---- STATUS ----
-    if status == "WORKING":
+    if result["status"] == "WORKING":
         st.success("✅ WORKING")
-    elif status == "WARNING":
+    elif result["status"] == "WARNING":
         st.warning("⚠️ WARNING")
     else:
         st.error("❌ ERROR")
 
     # ---- META ----
-    st.markdown(f"**Language:** `{language}`")
-    st.markdown(f"**Confidence:** `{confidence}`")
+    st.markdown(f"**Language:** `{result['language']}`")
+    st.markdown(f"**Confidence:** `{result['confidence']}`")
 
     # ---- SUMMARY ----
     st.markdown("### Issue summary")
-    st.write(summary)
+    st.write(result["error_summary"])
 
     # ---- EXPLANATION ----
     st.markdown("### What’s happening")
-    st.write(explanation)
+    st.write(result["explanation"])
 
     # ---- NEXT STEPS ----
     st.markdown("### What to do next")
-    for i, step in enumerate(steps, start=1):
+    for i, step in enumerate(result["next_steps"], start=1):
         st.code(f"{i}. {step}")
 
-    # ---- VISUAL OUTPUT ----
-    if uploaded_image and labels:
-        st.markdown("### Visual explanation")
-        img = Image.open(uploaded_image).convert("RGB")
-        annotated = annotate_with_labels(img, labels)
+    # ---- VISUAL ----
+    if img and result["visual_labels"]:
+        st.markdown("### Visual guidance")
+        annotated = annotate_with_labels(img.copy(), result["visual_labels"])
         st.image(annotated, use_column_width=True)
+
 
