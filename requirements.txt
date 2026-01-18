@@ -2,7 +2,6 @@ streamlit
 groq
 pillow
 pytesseract
-opencv-python
-numpy
+
 
 
