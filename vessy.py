@@ -5,165 +5,146 @@ import json
 from PIL import Image, ImageDraw
 import pytesseract
 
-# ================= CONFIG =================
+# ================= PAGE CONFIG =================
 st.set_page_config(
-    page_title="BREAKPOINT",
+    page_title="INTERPRETER",
     layout="centered"
 )
 
-st.title("🟥 BREAKPOINT")
-st.caption("See where things went wrong. Visually.")
+st.title("🧩 INTERPRETER")
+st.caption("We explain what your app is trying to say.")
 
+# ================= API =================
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 llm = Groq(api_key=GROQ_API_KEY)
 
 # ================= INPUT =================
-context = st.text_area(
-    "Paste error / logs (optional)",
-    height=160,
-    placeholder="Paste only the relevant error or output..."
+uploaded_image = st.file_uploader(
+    "Upload a screenshot of the problem",
+    type=["png", "jpg", "jpeg"]
 )
 
-uploaded_image = st.file_uploader(
-    "Upload screenshot (recommended)",
-    type=["png", "jpg", "jpeg"]
+user_note = st.text_area(
+    "What were you trying to do? (optional)",
+    placeholder="Example: Sending money, logging in, opening app",
+    height=90
 )
 
 # ================= SYSTEM PROMPT =================
 SYSTEM_PROMPT = """
-You are BREAKPOINT, a visual reasoning engine.
+You are INTERPRETER — an AI that translates software screens into human meaning.
 
 Your job:
-- Infer what the user is trying to do
-- Identify where the process diverged from expectation
-- Think in cause → effect → failure
-- Prefer visual understanding over text
+- Understand what the screen is saying
+- Explain it in calm, simple language
+- Reduce user confusion and panic
+- Tell the user what to do next
 
 Rules:
-- Use ONLY visible information
-- Never invent UI elements
-- Always produce at least ONE visual insight
-- Be concise, practical, and precise
+- Use ONLY what is visible on the screen or written by the user
+- Do NOT use technical terms
+- Do NOT guess hidden system behavior
+- Speak like a helpful human, not tech support
 
 Return ONLY valid JSON in this format:
 
 {
-  "status": "BLOCKING_ERROR | RISKY_STATE | SAFE_BUT_SUBOPTIMAL",
-  "language": "python | javascript | unknown",
-  "error_summary": "...",
-  "explanation": "...",
-  "expected_vs_actual": {
-    "expected": "...",
-    "actual": "..."
-  },
-  "next_steps": ["step 1", "step 2", "step 3"],
+  "screen_type": "payment | banking | system | app | unknown",
+  "plain_meaning": "One clear sentence explaining what this screen means",
+  "what_is_happening": "Short calm explanation in simple words",
+  "risk_level": "none | low | medium | high",
+  "what_to_do_now": [
+    "step 1",
+    "step 2",
+    "step 3"
+  ],
   "confidence": "high | medium | low",
-  "visual_labels": [
+  "visual_clues": [
     {
-      "label": "...",
-      "severity": "error | warning | info"
+      "label": "What this part of the screen indicates",
+      "severity": "info | warning"
     }
   ]
 }
 """
 
 # ================= OCR =================
-def extract_screen_text(image):
+def read_screen(image):
     try:
         text = pytesseract.image_to_string(image)
         return text.strip() if text.strip() else None
-    except Exception:
+    except:
         return None
 
 # ================= AI CORE =================
-def diagnose(context_text, image_text):
-    if not context_text.strip() and not image_text:
+def interpret(screen_text, user_note):
+    if not screen_text and not user_note.strip():
         return {
-            "status": "SAFE_BUT_SUBOPTIMAL",
-            "language": "unknown",
-            "error_summary": "No failure context provided",
-            "explanation": "There is not enough visible information to identify a breakpoint.",
-            "expected_vs_actual": {
-                "expected": "System should behave normally",
-                "actual": "No observable failure provided"
-            },
-            "next_steps": [
-                "Upload a screenshot where the issue is visible",
-                "Paste only the specific error message"
+            "screen_type": "unknown",
+            "plain_meaning": "No clear message found on the screen",
+            "what_is_happening": "The screenshot does not show a clear problem.",
+            "risk_level": "none",
+            "what_to_do_now": [
+                "Upload a screenshot where the message or error is visible"
             ],
             "confidence": "high",
-            "visual_labels": [
+            "visual_clues": [
                 {
-                    "label": "No failure signal visible",
+                    "label": "No readable message detected",
                     "severity": "info"
                 }
             ]
         }
 
-    user_content = ""
-
-    if context_text.strip():
-        user_content += f"LOGS / TEXT:\n{context_text}\n\n"
-
-    if image_text:
-        user_content += f"VISIBLE SCREEN TEXT:\n{image_text}\n\n"
-
-    user_content += "Reason strictly from the visible evidence."
+    content = ""
+    if screen_text:
+        content += f"SCREEN TEXT:\n{screen_text}\n\n"
+    if user_note.strip():
+        content += f"USER INTENT:\n{user_note}\n\n"
 
     response = llm.chat.completions.create(
         model="llama-3.1-8b-instant",
         messages=[
             {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user", "content": user_content}
+            {"role": "user", "content": content}
         ],
         temperature=0,
-        max_tokens=700
+        max_tokens=600
     )
 
     try:
         return json.loads(response.choices[0].message.content)
-    except Exception:
+    except:
         return {
-            "status": "BLOCKING_ERROR",
-            "language": "unknown",
-            "error_summary": "Breakpoint unclear",
-            "explanation": "The failure signal could not be reliably interpreted.",
-            "expected_vs_actual": {
-                "expected": "System continues execution",
-                "actual": "Execution halted or misbehaved"
-            },
-            "next_steps": [
-                "Upload a clearer screenshot",
-                "Crop the image to the error area"
+            "screen_type": "unknown",
+            "plain_meaning": "This screen is unclear",
+            "what_is_happening": "The message could not be confidently understood.",
+            "risk_level": "medium",
+            "what_to_do_now": [
+                "Try uploading a clearer screenshot",
+                "Make sure the message is readable"
             ],
             "confidence": "low",
-            "visual_labels": [
+            "visual_clues": [
                 {
-                    "label": "Ambiguous failure region",
+                    "label": "Unclear or incomplete screen message",
                     "severity": "warning"
                 }
             ]
         }
 
 # ================= VISUAL OVERLAY =================
-def annotate(image, labels):
+def draw_clues(image, clues):
     draw = ImageDraw.Draw(image)
     y = 30
 
-    color_map = {
-        "error": (255, 80, 80),
-        "warning": (255, 200, 80),
-        "info": (120, 180, 255)
-    }
-
-    for i, item in enumerate(labels, start=1):
-        text = f"{i}. {item['label']}"
-        color = color_map.get(item["severity"], (200, 200, 200))
+    for i, c in enumerate(clues, 1):
+        text = f"{i}. {c['label']}"
+        color = (255, 180, 80) if c["severity"] == "warning" else (120, 170, 255)
         width = len(text) * 9 + 20
 
         draw.rectangle(
             (20, y - 8, 20 + width, y + 28),
-            fill=(255, 255, 255),
             outline=color,
             width=3
         )
@@ -173,47 +154,39 @@ def annotate(image, labels):
     return image
 
 # ================= ACTION =================
-if st.button("Analyze Breakpoint"):
-    with st.spinner("Tracing failure..."):
+if st.button("Explain this screen"):
+    with st.spinner("Interpreting the screen..."):
         img = None
-        image_text = None
+        screen_text = None
 
         if uploaded_image:
             img = Image.open(uploaded_image).convert("RGB")
-            image_text = extract_screen_text(img)
+            screen_text = read_screen(img)
 
-        result = diagnose(context, image_text)
-
-    # ===== STATUS =====
-    if result["status"] == "BLOCKING_ERROR":
-        st.error("🟥 BLOCKING ERROR")
-    elif result["status"] == "RISKY_STATE":
-        st.warning("🟨 RISKY STATE")
-    else:
-        st.success("🟦 SAFE BUT SUBOPTIMAL")
-
-    st.markdown(f"**Language:** `{result['language']}`")
-    st.markdown(f"**Confidence:** `{result['confidence']}`")
+        result = interpret(screen_text, user_note)
 
     # ===== VISUAL FIRST =====
-    if img and result["visual_labels"]:
-        st.markdown("### Visual Breakpoints")
-        annotated_img = annotate(img.copy(), result["visual_labels"])
-        st.image(annotated_img, use_column_width=True)
+    if img and result["visual_clues"]:
+        st.image(draw_clues(img.copy(), result["visual_clues"]), use_column_width=True)
 
-    # ===== EXPLANATION =====
-    st.markdown("### What broke")
-    st.write(result["error_summary"])
+    # ===== MEANING =====
+    st.markdown("### What this screen means")
+    st.write(result["plain_meaning"])
 
-    st.markdown("### Why it broke")
-    st.write(result["explanation"])
+    st.markdown("### What is happening")
+    st.write(result["what_is_happening"])
 
-    st.markdown("### Expected vs Actual")
-    st.success(f"**Expected:** {result['expected_vs_actual']['expected']}")
-    st.error(f"**Actual:** {result['expected_vs_actual']['actual']}")
+    # ===== RISK =====
+    if result["risk_level"] == "high":
+        st.error("⚠️ High risk — do not retry immediately")
+    elif result["risk_level"] == "medium":
+        st.warning("⚠️ Some risk — proceed carefully")
+    else:
+        st.success("✅ No immediate risk detected")
 
-    st.markdown("### What to do next")
-    for i, step in enumerate(result["next_steps"], start=1):
-        st.code(f"{i}. {step}")
+    # ===== NEXT STEPS =====
+    st.markdown("### What you should do now")
+    for step in result["what_to_do_now"]:
+        st.write("•", step)
 
-
+    st.caption(f"Confidence: {result['confidence']}")
